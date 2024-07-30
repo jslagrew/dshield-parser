@@ -1,0 +1,7 @@
+matplotlib==3.6.2
+numpy==1.24.1
+pandas==1.5.2
+Requests==2.32.3
+scikit_learn==1.2.0
+shodan==1.28.0
+SQLAlchemy==2.0.31
