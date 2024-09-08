@@ -1,4 +1,4 @@
-Scripts used to process honeypot data for SANS ISE master's degree paper. 
+# Scripts used to process honeypot data for SANS ISE master's degree paper. 
 
 1) dshield_honeypot_comparisons_dbs_exclusions - Extract relevant data from honeypot logs based on selected JSON keys, time periods and IP address exclusions. Data extracted is stored in a SQLite file.
 
@@ -18,3 +18,5 @@ output file = 2024-09-07-141406_honeypot_enrichment_mappings.sqlite
 
 input file = 2024-09-07-141406_honeypot_enrichment_mappings.sqlite
 output file = 2024-09-08-080914_cluster_comparisons.sqlite
+
+![Diagram of data processing](https://github.com/jslagrew/dshield-parser/blob/main/examples/data_processing_diagram.PNG)
