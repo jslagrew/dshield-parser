@@ -108,7 +108,10 @@ def get_json_values(key, incoming_data, timespan=default_timespan, exclusions=No
                                 else:
                                     if each_key in yielded_json:
                                         #values.append(yielded_json[each_key])    
-                                        log_data[each_key] = yielded_json[each_key]
+                                        if isinstance(yielded_json[each_key], str):
+                                            log_data[each_key] = yielded_json[each_key].replace('\x00','') # added .replace('\x00','') on 8/17/24 to replace null bytes for pandas merge issues
+                                        else:
+                                            log_data[each_key] = yielded_json[each_key]
                             if len(log_data) > 0:
                                 values.append(log_data)
             else:
