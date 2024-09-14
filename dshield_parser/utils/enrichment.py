@@ -336,7 +336,10 @@ def get_reverse_dns(ipaddress):
     try:
         response = socket.gethostbyaddr(f"{ipaddress}")
     except Exception as e:
-        logging.error(f"Lookup failed for {ipaddress}: {e}")
+        if "host not found" in e:
+            logging.info(f"Lookup failed for {ipaddress}: {e}")
+        else:
+            logging.error(f"Lookup failed for {ipaddress}: {e}")
     if len(response) == 0:
         return response
     else:
