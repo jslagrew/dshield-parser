@@ -32,7 +32,7 @@ def read_file_json_generator(filename):
     for line in file:
         if line[:1] =="{":
             try:
-                yield json.loads(line)
+                yield json.loads(line) #.replace('\x00','') # added .replace('\x00','') on 8/17/24 to replace null bytes for pandas merge issues
             except Exception as e:
                 logging.error(f"Exception hit for file '{filename}': {e}")
                 logging.error(f"Text of line with error (limted to first 40 characters): '{line[0:40]}'")
