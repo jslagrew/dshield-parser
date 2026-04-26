@@ -32,9 +32,9 @@ def get_spur_data(log_source, input, session, api):
     while True:
         try:
             response = session.get(url)
-        except:
-            print("Exception hit for SPUR query")
-            #time.sleep(10)
+        except Exception as e:
+            logging.error(f"Exception hit for SPUR query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
             continue
         break
     json_data = json.loads(response.text)
@@ -61,7 +61,15 @@ def get_vt_data(input, input_type, api):
     else:
         logging.error("Invalid input type given for VirusTotal to process.")
     
-    response = requests.get(url, headers=headers)
+    while True:
+        try:
+            response = requests.get(url, headers=headers)
+        except Exception as e:
+            logging.error(f"Exception hit for VirusTotal query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
+            continue
+        break
+    
     json_response = json.loads(response.text)
     logging.debug(response.text)
     if "error" in json_response:
@@ -165,7 +173,16 @@ def isc_cloudapis(email):
     headers = {
         'User-Agent': f'Request from {email}',
     }   
-    response = requests.get(url, headers=headers)
+
+    while True:
+        try:
+            response = requests.get(url, headers=headers)
+        except Exception as e:
+            logging.error(f"Exception hit for Could IP SANS ISC query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
+            continue
+        break    
+    
     xml =  response.text
     root = ET.fromstring(xml)
     ips = []
@@ -193,7 +210,15 @@ def isc_cloudcidrs(email):
     headers = {
         'User-Agent': f'Request from {email}',
     }   
-    response = requests.get(url, headers=headers)
+    while True:
+        try:
+            response = requests.get(url, headers=headers)
+        except Exception as e:
+            logging.error(f"Exception hit for Cloud CIDR SANS ISC query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
+            continue
+        break    
+    
     xml =  response.text
     root = ET.fromstring(xml)
     ips = []
@@ -217,7 +242,16 @@ def isc_intelfeed(email):
     headers = {
         f'User-Agent': 'Request from {email}',
     }   
-    response = requests.get(url, headers=headers)
+
+    while True:
+        try:
+            response = requests.get(url, headers=headers)
+        except Exception as e:
+            logging.error(f"Exception hit for SANS ISC Intel Feed query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
+            continue
+        break
+    
     xml =  response.text
     root = ET.fromstring(xml)
 
@@ -231,7 +265,16 @@ def isc_ipinfo(ip, email):
     headers = {
         'User-Agent': f'Request from {email}',
     }   
-    response = requests.get(url, headers=headers)    
+
+    while True:
+        try:
+            response = requests.get(url, headers=headers) 
+        except Exception as e:
+            logging.error(f"Exception hit for SANS ISC IP info query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
+            continue
+        break
+
     while response.status_code != 200:
         delay = 5
         if response.status_code == 429:
@@ -289,7 +332,16 @@ def isc_research_threats(email, start_date=None, end_date=None):
     headers = {
         'User-Agent': f'Request from {email}',
     }   
-    response = requests.get(url, headers=headers)    
+
+    while True:
+        try:
+            response = requests.get(url, headers=headers)
+        except Exception as e:
+            logging.error(f"Exception hit for SANS ISC Research Threats query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
+            continue
+        break
+        
     xml =  response.text
     logging.debug(f"XML Data: {xml}")
     root = ET.fromstring(xml)
@@ -307,12 +359,24 @@ def isc_research_threats(email, start_date=None, end_date=None):
     return pd.DataFrame(threat_intel)
 
 def binary_edge_minions(email):
-    url = f"https://api.binaryedge.io/krang/v1/minions"
+    # bad URL as of 7/6/2025
+    # url = f"https://api.binaryedge.io/krang/v1/minions"
+    url = f"https://api.binaryedge.io/v1/minions"
 
     headers = {
         'User-Agent': f'Request from {email}',
     }   
-    response = requests.get(url, headers=headers)    
+
+    while True:
+        try:
+            #this gave error 404 on 7/6/2025
+            response = requests.get(url, headers=headers)  
+        except Exception as e:
+            logging.error(f"Exception hit for Binary Edge query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
+            continue
+        break    
+      
     scanners =  json.loads(response.text)['scanners']
 
     #return a list of binary edge minions (scanning agents)
@@ -324,7 +388,16 @@ def censys_networks(email):
     headers = {
         'User-Agent': f'Request from {email}',
     }   
-    response = requests.get(url, headers=headers)    
+
+    while True:
+        try:
+            response = requests.get(url, headers=headers) 
+        except Exception as e:
+            logging.error(f"Exception hit for Censys query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
+            continue
+        break
+
     scanners =  response.text.split("\n")
 
     #return a list of binary edge minions (scanning agents)
@@ -351,7 +424,15 @@ def isc_webhoneypot_useragents(user_agent, day, email):
     headers = {
         'User-Agent': f'Request from {email}',
     }   
-    response = requests.get(url, headers=headers)  
+    while True:
+        try:
+            response = requests.get(url, headers=headers)  
+        except Exception as e:
+            logging.error(f"Exception hit for SANS ISC web honeypot user agent query: '{e}'. Pausing for 15 seconds before trying again.")
+            time.sleep(15)
+            continue
+        break
+    
     return json.loads(response.text)    
     
 def extract_ips(data):
@@ -375,16 +456,3 @@ def extract_subnets(data):
         except:
             logging.error(f"Error trying to create network object from {each_network}")
     return return_networks   
-
-
-#cloudips = isc_cloudapis()
-#insert_df(f"{date}_iscdata.sqlite", cloudips, "cloudips")
-
-#cloudcidr = isc_cloudcidrs()
-#insert_df(f"{date}_iscdata.sqlite", cloudcidr, "cloudcidrs")
-
-#ipdata = isc_ipinfo("70.91.145.10")
-#insert_dict(f"{date}_iscdata.sqlite", ipdata, "70.91.145.10")  
-
-#research_data = isc_research_threats()
-#insert_df(f"{date}_iscdata.sqlite", research_data, "research_ip")  

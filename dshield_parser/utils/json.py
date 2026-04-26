@@ -11,6 +11,7 @@ import dshield_parser
 import dshield_parser.firewall_processor
 import dshield_parser.firewall_processor.reports
 import dshield_parser.utils.file_io as file_io
+import pandas as pd
 
 default_datespan={'start_date': '1970-01-01', 'end_date': '3000-01-01'}
 default_timespan={"start_time": 0, "end_time": 32516881838}
@@ -68,7 +69,18 @@ def print_list(list):
     for each_item in list:
         print(each_item)
 
-def get_json_values(key, incoming_data, timespan=default_timespan, exclusions=None):
+def sizeof_fmt(num, suffix='B'):
+    ''' by Fred Cirera,  https://stackoverflow.com/a/1094933/1870254, modified'''
+    for unit in ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']:
+        if abs(num) < 1024.0:
+            return "%3.1f %s%s" % (num, unit, suffix)
+        num /= 1024.0
+    return "%.1f %s%s" % (num, 'Yi', suffix)
+
+def get_json_values(key, incoming_data, timespan=default_timespan, exclusions=None, compress_dates=False):
+    day_count = 0
+    df = pd.DataFrame()
+    #new_df = pd.DataFrame()
     if "start_time" in timespan and "end_time" in timespan:
         start_date = convert_to_date(timespan["start_time"])
         end_date = convert_to_date(timespan["end_time"])    
@@ -110,10 +122,48 @@ def get_json_values(key, incoming_data, timespan=default_timespan, exclusions=No
                                         #values.append(yielded_json[each_key])    
                                         if isinstance(yielded_json[each_key], str):
                                             log_data[each_key] = yielded_json[each_key].replace('\x00','') # added .replace('\x00','') on 8/17/24 to replace null bytes for pandas merge issues
+                                        elif isinstance(yielded_json[each_key], dict):
+                                            log_data[each_key] = json.dumps(yielded_json[each_key])
                                         else:
                                             log_data[each_key] = yielded_json[each_key]
                             if len(log_data) > 0:
-                                values.append(log_data)
+                                if compress_dates == True:
+                                    #dates = [dshield_parser.utils.json.time_to_day(timestamp) for timestamp in df["time"]
+                                    try:
+                                        # different time field for cowrie honeypot data
+                                        log_data["dates"] = dshield_parser.utils.json.time_to_day(log_data["timestamp"])
+                                        log_data.pop("timestamp")
+                                    except Exception as e:
+                                        # different time field for web or firewall honeypot data
+                                        log_data["dates"] = dshield_parser.utils.json.time_to_day(log_data["time"])
+                                        log_data.pop("time")                                        
+                                    values.append(log_data)
+                                #df = pd.concat([df, pd.DataFrame([log_data])], ignore_index=True) 
+                                ##new_df = pd.DataFrame([log_data])
+                                #new_df = pd.concat([new_df, temp_df])
+                                ##new_df = new_df.groupby(new_df.columns.tolist(),as_index=False, dropna=False).size()
+                                ##df = pd.concat([df, new_df]).groupby(new_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()
+                        #new_df = new_df.groupby(new_df.columns.tolist(),as_index=False, dropna=False).size()
+                        #df = pd.concat([df, new_df]).groupby(new_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()
+                        #new_df = pd.DataFrame()
+
+                    #summarization will be run at the end of every file processed
+                    if compress_dates == True:
+                        if day_count % 50 == 0 or len(values) > 500000:   #compress if 50 days of data or more than 500k records
+                            logging.info(f"50 days of data processed or more than 500k records found. Collapsing dataframe by date (grouping by).")
+                            file_df = pd.DataFrame(values)
+                            file_df = file_df.groupby(file_df.columns.tolist(),as_index=False, dropna=False).size()
+                            df = pd.concat([df, file_df]).groupby(file_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()
+                            values = []
+                        elif end_date in file.name or (file.name == incoming_data[-1].name):
+                            logging.info(f"Last day being processed: {date}")
+                            file_df = pd.DataFrame(values)
+                            file_df = file_df.groupby(file_df.columns.tolist(),as_index=False, dropna=False).size()
+                            df = pd.concat([df, file_df]).groupby(file_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()     
+                            values = []                      
+                    day_count += 1
+                     
+                                
             else:
                 for yielded_json in file_io.read_file_json_generator(file):
                     if "logs" in yielded_json:
@@ -135,12 +185,51 @@ def get_json_values(key, incoming_data, timespan=default_timespan, exclusions=No
                                     else:
                                         logging.debug(f"Filtered out data since {each_item['time']} is not between {timespan['start_time']} and {timespan['end_time']}")  
                             if len(log_data) > 0:
-                                values.append(log_data)                                               
+                                if compress_dates == True:
+                                    #dates = [dshield_parser.utils.json.time_to_day(timestamp) for timestamp in df["time"]
+                                    try:
+                                        # different time field for cowrie honeypot data
+                                        log_data["dates"] = dshield_parser.utils.json.time_to_day(log_data["timestamp"])
+                                        log_data.pop("timestamp")
+                                    except Exception as e:
+                                        # different time field for web or firewall honeypot data
+                                        log_data["dates"] = dshield_parser.utils.json.time_to_day(log_data["time"])
+                                        log_data.pop("time")                                        
+                                    values.append(log_data)
+                #end of processing firewall log
+                logging.info(f"Undated data file finished processing: {file}")
+                file_df = pd.DataFrame(values)
+                file_df = file_df.groupby(file_df.columns.tolist(),as_index=False, dropna=False).size()
+                df = pd.concat([df, file_df]).groupby(file_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()     
+                values = []    
+                                                        
         else:
             for each_item in file:
                 if key in each_item:
-                    values.append(each_item[key])
-    return values
+                    if compress_dates == True:
+                        #dates = [dshield_parser.utils.json.time_to_day(timestamp) for timestamp in df["time"]
+                        try:
+                            # different time field for cowrie honeypot data
+                            log_data["dates"] = dshield_parser.utils.json.time_to_day(log_data["timestamp"])
+                            log_data.pop("timestamp")
+                        except Exception as e:
+                            # different time field for web or firewall honeypot data
+                            log_data["dates"] = dshield_parser.utils.json.time_to_day(log_data["time"])
+                            log_data.pop("time")                                        
+                        values.append(log_data)
+                logging.info(f"Firewall log finished processing: {file}")
+                file_df = pd.DataFrame(values)
+                file_df = file_df.groupby(file_df.columns.tolist(),as_index=False, dropna=False).size()
+                df = pd.concat([df, file_df]).groupby(file_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()     
+                values = []                
+
+    # print out variable memory usage
+    for name, size in sorted(((name, sys.getsizeof(value)) for name, value in list(
+                            locals().items())), key= lambda x: -x[1])[:10]:
+        print("{:>30}: {:>8}".format(name, sizeof_fmt(size)))
+
+    df = df.groupby(df.columns.tolist(),as_index=False, dropna=False)['size'].sum()
+    return df
 
 def summarize_values(list):
     summary = {}

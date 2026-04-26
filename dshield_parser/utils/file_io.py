@@ -62,6 +62,8 @@ def get_file_lists(path):
             cowrie_files.append(each_item)
         elif "webhoneypot-" in str(each_item):
             web_honeypot_files.append(each_item)
+        elif "webhoneypot_" in str(each_item):
+            web_honeypot_files.append(each_item)            
     cowrie_files = sorted(cowrie_files, key=os.path.getmtime)
     web_honeypot_files = sorted(web_honeypot_files, key=os.path.getmtime)
     firewall_files = sorted(firewall_files, key=os.path.getmtime)
