@@ -13,6 +13,6 @@ setuptools.setup(
     #    ['summarize_urls=utils.json:summarize_urls',
     #     'summarize_urls=utils.json:summarize_commands']
     #},
-    python_requires='>3.12.7'
+    python_requires='>=3.12.7'
     #install_requires=['matplotlib', 'numpy', 'pandas', 'Requests', 'scikit_learn', 'shodan', 'SQLAlchemy']
 )
