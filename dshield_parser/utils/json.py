@@ -16,6 +16,19 @@ import pandas as pd
 default_datespan={'start_date': '1970-01-01', 'end_date': '3000-01-01'}
 default_timespan={"start_time": 0, "end_time": 32516881838}
 
+def _groupby_size(df):
+    """
+    Compatibility wrapper for groupby().size() that works with pandas 2.x and 3.x.
+    In pandas 3.0, 'size' became a reserved GroupBy method name and can no longer
+    be used as a column selector after groupby(). This helper renames the column
+    temporarily to avoid the conflict.
+    """
+    group_cols = df.columns.difference(['size']).tolist()
+    result = df.rename(columns={'size': '_count'})
+    result = result.groupby(result.columns.difference(['_count']).tolist(), as_index=False, dropna=False)['_count'].sum()
+    result = result.rename(columns={'_count': 'size'})
+    return result
+
 def print_json_pretty(incoming_data):
     for json_data in incoming_data:
         if os.path.exists(json_data):
@@ -153,13 +166,13 @@ def get_json_values(key, incoming_data, timespan=default_timespan, exclusions=No
                             logging.info(f"50 days of data processed or more than 500k records found. Collapsing dataframe by date (grouping by).")
                             file_df = pd.DataFrame(values)
                             file_df = file_df.groupby(file_df.columns.tolist(),as_index=False, dropna=False).size()
-                            df = pd.concat([df, file_df]).groupby(file_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()
+                            df = _groupby_size(pd.concat([df, file_df]))
                             values = []
                         elif end_date in file.name or (file.name == incoming_data[-1].name):
                             logging.info(f"Last day being processed: {date}")
                             file_df = pd.DataFrame(values)
                             file_df = file_df.groupby(file_df.columns.tolist(),as_index=False, dropna=False).size()
-                            df = pd.concat([df, file_df]).groupby(file_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()     
+                            df = _groupby_size(pd.concat([df, file_df]))
                             values = []                      
                     day_count += 1
                      
@@ -200,7 +213,7 @@ def get_json_values(key, incoming_data, timespan=default_timespan, exclusions=No
                 logging.info(f"Undated data file finished processing: {file}")
                 file_df = pd.DataFrame(values)
                 file_df = file_df.groupby(file_df.columns.tolist(),as_index=False, dropna=False).size()
-                df = pd.concat([df, file_df]).groupby(file_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()     
+                df = _groupby_size(pd.concat([df, file_df]))
                 values = []    
                                                         
         else:
@@ -220,7 +233,7 @@ def get_json_values(key, incoming_data, timespan=default_timespan, exclusions=No
                 logging.info(f"Firewall log finished processing: {file}")
                 file_df = pd.DataFrame(values)
                 file_df = file_df.groupby(file_df.columns.tolist(),as_index=False, dropna=False).size()
-                df = pd.concat([df, file_df]).groupby(file_df.columns.tolist(),as_index=False, dropna=False)['size'].sum()     
+                df = _groupby_size(pd.concat([df, file_df]))
                 values = []                
 
     # print out variable memory usage
@@ -228,7 +241,7 @@ def get_json_values(key, incoming_data, timespan=default_timespan, exclusions=No
                             locals().items())), key= lambda x: -x[1])[:10]:
         print("{:>30}: {:>8}".format(name, sizeof_fmt(size)))
 
-    df = df.groupby(df.columns.tolist(),as_index=False, dropna=False)['size'].sum()
+    df = _groupby_size(df)
     return df
 
 def summarize_values(list):
@@ -482,7 +495,7 @@ def convert_to_datetime(dictionary):
     return new_dates
 
 def convert_to_epoch(date):
-    return datetime.strptime(date, "%Y-%m-%d")
+    return datetime.strptime(date, "%Y-%m-%d").timestamp()
 
 def convert_to_date(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
