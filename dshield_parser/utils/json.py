@@ -22,8 +22,19 @@ def _groupby_size(df):
     In pandas 3.0, 'size' became a reserved GroupBy method name and can no longer
     be used as a column selector after groupby(). This helper renames the column
     temporarily to avoid the conflict.
+    Handles edge cases where df is empty or does not yet have a 'size' column.
     """
+    if df.empty:
+        return df
+    if 'size' not in df.columns:
+        # No size column yet — just do a count groupby and name it 'size'
+        group_cols = df.columns.tolist()
+        result = df.groupby(group_cols, as_index=False, dropna=False).size()
+        return result
     group_cols = df.columns.difference(['size']).tolist()
+    if not group_cols:
+        # Only column is 'size', nothing meaningful to group by
+        return df
     result = df.rename(columns={'size': '_count'})
     result = result.groupby(result.columns.difference(['_count']).tolist(), as_index=False, dropna=False)['_count'].sum()
     result = result.rename(columns={'_count': 'size'})
