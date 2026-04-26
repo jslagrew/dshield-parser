@@ -2,7 +2,7 @@ import setuptools
 
 setuptools.setup(
     name="dshield_parser",
-    version="0.1.3",
+    version="0.1.4",
     author="Jesse La Grew",
     author_email="jlagrew.github@proton.me",
     description="This program has utilities to download, parse and enrich DSHield honeypot data",
