@@ -5,7 +5,7 @@ setuptools.setup(
     version="0.1.7",
     author="Jesse La Grew",
     author_email="jlagrew.github@proton.me",
-    description="This program has utilities to download, parse and enrich DSHield honeypot data",
+    description="This program has utilities to download, parse and enrich DShield honeypot data",
     url="https://github.com/jslagrew/dshield-parser",
     packages=setuptools.find_packages(),
     #entry_points = {
@@ -13,7 +13,7 @@ setuptools.setup(
     #    ['summarize_urls=utils.json:summarize_urls',
     #     'summarize_urls=utils.json:summarize_commands']
     #},
-    python_requires='>=3.12.7'
+    python_requires='>=3.12',
     install_requires=[
         "matplotlib>=3.6.3",
         "numpy>=1.26.0",
