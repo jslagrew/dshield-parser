@@ -10,5 +10,4 @@ The easiest way to install is using pip.
 
 # depending on your system, you may need to replace "pip" with "pip3"
 pip install dshield-parser
-pip install -r https://raw.githubusercontent.com/jslagrew/dshield-parser/main/requirements.txt
 ```
