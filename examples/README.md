@@ -1,23 +1,37 @@
-# Scripts used to process honeypot data for SANS ISE master's degree paper. 
+# Example analysis workflow
 
-1) dshield_honeypot_comparisons_dbs_exclusions - Extract relevant data from honeypot logs based on selected JSON keys, time periods and IP address exclusions. Data extracted is stored in a SQLite file.
+These scripts illustrate a research analysis of several DShield honeypots. Edit each script's paths, date range, selected sensors, and output directory before running it. They are examples, not a packaged command-line interface; individual scripts use local configuration values and may require enrichment service access.
 
-output file = 2024-09-07-120032_extracts_dates.sqlite
+```mermaid
+flowchart LR
+    A[Cowrie, web, and firewall logs] --> B[Extract selected fields by sensor and date]
+    B --> C[SQLite comparison extracts]
+    C --> D[Enrich file hashes]
+    C --> E[Identify research IPs]
+    D --> F[Cluster URLs and commands]
+    E --> F
+    F --> G[SQLite clusters and review text]
+```
 
-2) enrich_summary_hashes.py - Reads a SQLlite file and adds VirusTotal enrichment to file hashes uploaded or downloaded to the honeypot(s) ("outfile" field in Cowrie data is the file hash). Adds a "hashes" table to the SQLite file used. 
+## Sequence
 
-input file = 2024-09-07-120032_extracts_dates.sqlite  
-output file = 2024-09-07-120032_extracts_dates.sqlite
+1. [`dshield_honeypot_comparisons_dbs_exclusions.py`](dshield_honeypot_comparisons_dbs_exclusions.py) discovers sensor directories, extracts selected Cowrie, web, and firewall fields for a configured date range, applies configured exclusions, and writes per-sensor and combined SQLite comparison tables. It uses the library's JSON and SQL helpers.
+2. [`enrich_summary_hashes.py`](enrich_summary_hashes.py) adds VirusTotal context for file hashes from the extract database. It writes a `hashes` table to that database.
+3. [`clear_research_ips.py`](clear_research_ips.py) combines IP context from configured sources to help distinguish research or infrastructure traffic. It writes an enrichment-mapping database.
+4. [`url-command-clustering.py`](url-command-clustering.py) explores URL and command similarity across honeypots with clustering parameters, producing SQLite cluster data and review text.
 
-3) clear_research_ips - Enrich data based on IP addresses to help identify research IP addresses. Enrichment data is sourced from the SANS Internet Storm Center, Shodan, vendor IP addresses, WHOIS data and reverse DNS lookups.
+```mermaid
+flowchart TD
+    A[Select sensors, dates, fields, exclusions] --> B[Extract Cowrie, web, firewall]
+    B --> C[Write per-sensor SQLite tables]
+    C --> D[Merge comparisons across sensors]
+    D --> E[Optional hash and IP enrichment]
+    E --> F[URL and command clustering]
+    F --> G[Review SQLite and text outputs]
+```
 
-input file = 2024-09-07-120032_extracts_dates.sqlite  
-output file = 2024-09-07-141406_honeypot_enrichment_mappings.sqlite
+Run from a checkout with `python -m pip install -e .` completed. The scripts use their own paths rather than a shared config file, so review each script before executing it. A typical invocation is `python examples/dshield_honeypot_comparisons_dbs_exclusions.py` after adapting its settings. Subsequent scripts expect the SQLite artifacts made by the earlier steps; update their input filenames to match your run.
 
-4) url-command-clustering - Build clusters from honeypot URLs and commands to group similar commands and find differences between honeypots. This uses changing EPS and minsample values to create new clusters. The clusters and values used to create the clusters are stored in a SQLite database file. Text files are also generated for an easier review of the data. Some feature examples in the script are commented out, but were used to test different features.
+The extraction example groups and counts records by selected fields and day. Across sensors, it uses an outer merge so a pattern seen at only one sensor still appears. Its aggregate counts describe the selected records and exclusion rules, not unique attack sessions. Review the schema and join keys before comparing totals or combining this output with another project's session database.
 
-input file = 2024-09-07-141406_honeypot_enrichment_mappings.sqlite  
-output file = 2024-09-08-080914_cluster_comparisons.sqlite  
-
-
-![Diagram of data processing](https://github.com/jslagrew/dshield-parser/blob/main/examples/data_processing_diagram.PNG)
+The existing [processing diagram](data_processing_diagram.PNG) is a reference for the original research workflow. The Mermaid diagrams above describe the same sequence in editable text.
