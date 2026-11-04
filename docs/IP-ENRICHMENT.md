@@ -367,6 +367,7 @@ lookup failures from confirmed absence.
 ## Testing and release checks
 
 ```sh
+python -m pip install ".[geoip]" build setuptools wheel
 python -m unittest discover -s dshield_parser/test -p "test_enrichment*.py" -v
 python -m build
 ```

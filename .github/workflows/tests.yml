@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install package with optional local database reader
-        run: python -m pip install ".[geoip]" build
+        run: python -m pip install ".[geoip]" build setuptools wheel
       - name: Run offline enrichment regression tests
         run: python -m unittest discover -s dshield_parser/test -p "test_enrichment*.py" -v
       - name: Build distribution
