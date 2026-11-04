@@ -1,6 +1,7 @@
 """Offline tests for the shared enrichment cache."""
 
 import concurrent.futures
+from contextlib import closing
 import math
 from pathlib import Path
 import sqlite3
@@ -47,7 +48,9 @@ class EnrichmentCacheTests(unittest.TestCase):
                 cache.put("dns", "ip", {"new": True}, ttl=30)
             with EnrichmentCache(path, clock=lambda: self.now) as cache:
                 self.assertEqual(cache.get("dns", "ip"), {"new": True})
-            with sqlite3.connect(path) as connection:
+            # A SQLite connection context commits/rolls back but does not close.
+            # Close this inspection handle before TemporaryDirectory removes it.
+            with closing(sqlite3.connect(path)) as connection:
                 self.assertEqual(connection.execute(
                     "SELECT COUNT(*) FROM enrichment_cache"
                 ).fetchone()[0], 1)
