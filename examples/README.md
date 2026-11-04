@@ -2,6 +2,21 @@
 
 These scripts illustrate a research analysis of several DShield honeypots. Edit each script's paths, date range, selected sensors, and output directory before running it. They are examples, not a packaged command-line interface; individual scripts use local configuration values and may require enrichment service access.
 
+## IP enrichment configuration in 0.2.0
+
+`clear_research_ips.py` uses persistent bounded reverse DNS and one metadata row
+per IP. Configure `DSHIELD_CONTACT_EMAIL` for HTTP lookups and optionally
+`SHODAN_API_KEY` for Shodan. Set `DSHIELD_ASN_MMDB` or `DSHIELD_IPTOASN_FILE` to
+use a downloaded local ASN database; without either, ISC remains the source for
+ASN/network context. Set `DSHIELD_ENRICHMENT_CACHE` to reuse a chosen SQLite cache
+across runs; its default is `~/dshield-parser-cache/enrichment.sqlite`.
+
+The local ASN option does not disable the script's other external scanner feeds.
+IP metadata and DNS status columns make incomplete enrichment visible. The old
+`ip_lookups.txt` cache is no longer automatically consumed. See the
+[enrichment guide](../docs/IP-ENRICHMENT.md#updating-the-example-workflow) for
+examples, field meanings, migration details, and provider retry behavior.
+
 ```mermaid
 flowchart LR
     A[Cowrie, web, and firewall logs] --> B[Extract selected fields by sensor and date]
@@ -35,3 +50,4 @@ Run from a checkout with `python -m pip install -e .` completed. The scripts use
 The extraction example groups and counts records by selected fields and day. Across sensors, it uses an outer merge so a pattern seen at only one sensor still appears. Its aggregate counts describe the selected records and exclusion rules, not unique attack sessions. Review the schema and join keys before comparing totals or combining this output with another project's session database.
 
 The existing [processing diagram](data_processing_diagram.PNG) is a reference for the original research workflow. The Mermaid diagrams above describe the same sequence in editable text.
+

@@ -2,6 +2,21 @@
 
 Python utilities for reading and summarizing DShield Cowrie, web honeypot, and firewall logs. The package exposes importable readers and report helpers. The scripts in [`examples/`](examples/README.md) show a research workflow that compares multiple honeypots, writes SQLite extracts, enriches selected records, and clusters URLs or commands.
 
+## New in 0.2.0: local and cached IP enrichment
+
+`dshield_parser.utils.enrichment` now provides local GeoLite2 ASN/Country and
+IPtoASN lookups, selective RDAP, persistent TTL-aware reverse DNS, bounded ISC
+requests, and atomic ISC static-feed downloads. The example workflow fixes
+Onyphe labeling and validates enrichment joins so repeated metadata cannot
+multiply event counts.
+
+See the [complete enrichment guide](docs/IP-ENRICHMENT.md) for installation,
+database downloads, function examples, result fields, cache behavior, and
+migration from 0.1.x. The [changelog](CHANGELOG.md) lists release changes.
+
+From a checkout, install the optional MaxMind reader with
+`python -m pip install -e ".[geoip]"`. Database files remain caller-managed.
+
 ## Installing
 
 Python 3.12 or later is required by this repository's `setup.py`. A virtual environment is recommended:
@@ -66,3 +81,4 @@ For a multi-honeypot comparison, see [the example sequence](examples/README.md).
 ## Data handling
 
 The package reads local log paths supplied by your code. Examples may create SQLite files, text, plots, or enrichment results in their working directory. Review the script's input and output paths before running it on production data. Keep logs, databases, API keys, and generated output outside the source repository. Enrichment functions that call external services require their own service configuration and may have rate or availability limits.
+

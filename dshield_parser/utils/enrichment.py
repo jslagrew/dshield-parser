@@ -1,22 +1,102 @@
-import logging, datetime
-import sys
-import re
+"""IP enrichment helpers.
+
+Local databases are opt-in and never download themselves. DNS/RDAP/ISC helpers
+accept an explicit persistent cache; see docs/IP-ENRICHMENT.md for result fields,
+provider limits, and migration from 0.1.x.
+"""
+
 import json
-import requests #needs to be installed
-import shodan #needs to be installed
-import dshield_parser.utils as utils
-import dshield_parser.utils.json as dshield_json
-import pandas as pd
-import sys
-import os
+import logging
+import re
 import time
 import ipaddress
-import requests
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from functools import lru_cache
-import datetime
-import socket
+from urllib.parse import quote
+
+import pandas as pd
+import requests
+
+from ._enrichment_cache import EnrichmentCache
+from . import _enrichment_dns as _dns
+from . import _enrichment_http as _http
+from . import _enrichment_local as _local
+from ._enrichment_http import EnrichmentError, EnrichmentRateLimitError
+
+
+def get_geoip_asn(ip, database_path=None, *, reader=None):
+    """Look up ASN/organization in a local GeoLite2 ASN MMDB.
+
+    Install the ``geoip`` extra. Pass an open geoip2 reader for repeated lookups
+    to avoid reopening the file. This function never downloads a database.
+    """
+    return _local.get_geoip_asn(ip, database_path, reader=reader)
+
+
+def get_geoip_country(ip, database_path=None, *, reader=None):
+    """Look up local IP geolocation and registered country as distinct fields."""
+    return _local.get_geoip_country(ip, database_path, reader=reader)
+
+
+def load_iptoasn_database(path):
+    """Load/index a downloaded plain or gzip IPtoASN TSV once for reuse."""
+    return _local.load_iptoasn_database(path)
+
+
+def get_iptoasn_data(ip, database):
+    """Look up an IP in an object returned by load_iptoasn_database."""
+    return _local.get_iptoasn_data(ip, database)
+
+
+def get_rdap_data(ip, *, email, session=None, cache=None, bootstrap=None,
+                  timeout=(3.05, 10), max_attempts=3, cache_ttl=604800):
+    """Query authoritative RDAP registration data, optionally caching exact IPs.
+
+    Bootstrap discovery supports IPv4/IPv6. Returned registration fields remain
+    separate from ASN attribution; contact entities are not recursively fetched.
+    EnrichmentRateLimitError tells callers when deferred work can be retried.
+    """
+    return _http.get_rdap_data(
+        ip, email=email, session=session, cache=cache, bootstrap=bootstrap,
+        timeout=timeout, max_attempts=max_attempts, cache_ttl=cache_ttl,
+    )
+
+
+def get_reverse_dns_info(ip, *, resolver=None, cache=None, timeout=1.0,
+                         lifetime=3.0, failure_ttl=60):
+    """Return PTR names, status and expiration using bounded DNS resolution."""
+    return _dns.get_reverse_dns_info(
+        ip, resolver=resolver, cache=cache, timeout=timeout,
+        lifetime=lifetime, failure_ttl=failure_ttl,
+    )
+
+
+def iter_reverse_dns(ips, *, max_workers=16, resolver=None, cache=None,
+                     timeout=1.0, lifetime=3.0, failure_ttl=60):
+    """Yield completed unique-IP PTR records with bounded in-flight work.
+
+    Ordering is completion order. Include ``ip`` when joining results back to
+    input data; never assume position matches the input iterable.
+    """
+    yield from _dns.iter_reverse_dns(
+        ips, max_workers=max_workers, resolver=resolver, cache=cache,
+        timeout=timeout, lifetime=lifetime, failure_ttl=failure_ttl,
+    )
+
+
+def download_isc_feed(feed, destination, *, email, session=None, cache=None,
+                      timeout=(3.05, 10), max_attempts=3, **kwargs):
+    """Atomically save a supported ISC static feed, retaining the last good file.
+
+    Feed names are ``daily_sources`` and ``threatintel``. The download retains
+    the original provider format; it is not a complete WHOIS/ASN database.
+    See docs/IP-ENRICHMENT.md for refresh and size-limit options.
+    """
+    return _http.download_isc_feed(
+        feed, destination, email=email, session=session, cache=cache,
+        timeout=timeout, max_attempts=max_attempts, **kwargs,
+    )
+
 
 #Enter a valid IP Address (e.g. 1.1.1.1), ASN (e.g. AS1234), or TAG (e.g. NORD_VPN)
 @lru_cache
@@ -102,9 +182,14 @@ def get_vt_data(input, input_type, api):
 def get_uh_data(input):
     pass
 
-@lru_cache
-def get_whois_data(input):
-    pass
+def get_whois_data(input, email, **kwargs):
+    """Return structured registration data using :func:`get_rdap_data`.
+
+    This replaces the old no-op placeholder. It uses RDAP over HTTPS and needs
+    contact information for the request User-Agent; it does not issue port-43
+    WHOIS requests or recursively retrieve contact entities.
+    """
+    return get_rdap_data(input, email=email, **kwargs)
 
 @lru_cache
 def get_isc_data(input):
@@ -112,6 +197,11 @@ def get_isc_data(input):
 
 @lru_cache
 def get_shodan_host(input, key):
+    if not key:
+        logging.info("Skipping Shodan host enrichment: no API key configured")
+        return None
+    import shodan
+
     api_shodan = shodan.Shodan(key)
     try:
         info = api_shodan.host(input)
@@ -122,6 +212,11 @@ def get_shodan_host(input, key):
 
 @lru_cache
 def get_shodan_domain(input, key):
+    if not key:
+        logging.info("Skipping Shodan domain enrichment: no API key configured")
+        return {"data": []}
+    import shodan
+
     api_shodan = shodan.Shodan(key)
     try:
         info = api_shodan.dns.domain_info(input)
@@ -174,16 +269,11 @@ def isc_cloudapis(email):
         'User-Agent': f'Request from {email}',
     }   
 
-    while True:
-        try:
-            response = requests.get(url, headers=headers)
-        except Exception as e:
-            logging.error(f"Exception hit for Could IP SANS ISC query: '{e}'. Pausing for 15 seconds before trying again.")
-            time.sleep(15)
-            continue
-        break    
+    with _http.request_get(url, email=email, stream=True) as response:
+        body = _http._read_body(response, 64 * 1024 * 1024)
+    text_response = body.decode("utf-8-sig")
     
-    xml =  response.text
+    xml =  text_response
     root = ET.fromstring(xml)
     ips = []
     netmasks = []
@@ -210,16 +300,11 @@ def isc_cloudcidrs(email):
     headers = {
         'User-Agent': f'Request from {email}',
     }   
-    while True:
-        try:
-            response = requests.get(url, headers=headers)
-        except Exception as e:
-            logging.error(f"Exception hit for Cloud CIDR SANS ISC query: '{e}'. Pausing for 15 seconds before trying again.")
-            time.sleep(15)
-            continue
-        break    
+    with _http.request_get(url, email=email, stream=True) as response:
+        body = _http._read_body(response, 64 * 1024 * 1024)
+    text_response = body.decode("utf-8-sig")
     
-    xml =  response.text
+    xml =  text_response
     root = ET.fromstring(xml)
     ips = []
     providers = []
@@ -240,81 +325,32 @@ def isc_cloudcidrs(email):
 def isc_intelfeed(email):
     url = "https://isc.sans.edu/api/intelfeed"
     headers = {
-        f'User-Agent': 'Request from {email}',
+        'User-Agent': f'Request from {email}',
     }   
 
-    while True:
-        try:
-            response = requests.get(url, headers=headers)
-        except Exception as e:
-            logging.error(f"Exception hit for SANS ISC Intel Feed query: '{e}'. Pausing for 15 seconds before trying again.")
-            time.sleep(15)
-            continue
-        break
+    with _http.request_get(url, email=email, stream=True) as response:
+        body = _http._read_body(response, 64 * 1024 * 1024)
+    text_response = body.decode("utf-8-sig")
     
-    xml =  response.text
+    xml =  text_response
     root = ET.fromstring(xml)
 
 
     #return pd.DataFrame(d)
 
-@lru_cache
-def isc_ipinfo(ip, email):
+def isc_ipinfo(ip, email, *, session=None, cache=None, timeout=(3.05, 10),
+               max_attempts=3, cache_ttl=86400):
+    """Return the legacy ``{ip: fields}`` ISC result with bounded requests.
 
-    url = f"https://isc.sans.edu/api/ip/{ip}"
-    headers = {
-        'User-Agent': f'Request from {email}',
-    }   
+    Missing optional fields are None. HTTP 429 raises EnrichmentRateLimitError
+    with retry_at/retry_after instead of blocking the entire job for minutes.
+    Pass an EnrichmentCache to reuse exact-IP results across separate runs.
+    """
+    return _http.isc_ipinfo(
+        ip, email, session=session, cache=cache, timeout=timeout,
+        max_attempts=max_attempts, cache_ttl=cache_ttl,
+    )
 
-    while True:
-        try:
-            response = requests.get(url, headers=headers) 
-        except Exception as e:
-            logging.error(f"Exception hit for SANS ISC IP info query: '{e}'. Pausing for 15 seconds before trying again.")
-            time.sleep(15)
-            continue
-        break
-
-    while response.status_code != 200:
-        delay = 5
-        if response.status_code == 429:
-            logging.error(f"Request limit reached: {response.text}")
-            try:
-                delay_received = int(re.findall(r'.*Try again after (.*) seconds', response.text)[0])
-                delay = int(delay_received)
-                logging.error(f"Delaying for an additional {delay} seconds")
-            except:
-                logging.error(f"Some issue occured with the delay we recevied: {delay_received}")
-        time.sleep(delay)
-        response = requests.get(url, headers=headers) 
-    if response.status_code == 200:
-        xml =  response.text
-        logging.debug(f"XML Data: {xml}")
-        root = ET.fromstring(xml)
-        ipdata = {}
-        ipdata[ip] = {}
-        ipdata[ip]["number"] = root.findall("number")[0].text
-        ipdata[ip]["count"] = root.findall("count")[0].text
-        ipdata[ip]["attacks"] = root.findall("attacks")[0].text
-        ipdata[ip]["maxdate"] = root.findall("maxdate")[0].text
-        ipdata[ip]["mindate"] = root.findall("mindate")[0].text
-        ipdata[ip]["updated"] = root.findall("updated")[0].text
-        ipdata[ip]["comment"] = root.findall("comment")[0].text
-        ipdata[ip]["maxrisk"] = root.findall("maxrisk")[0].text
-        ipdata[ip]["asabusecontact"] = root.findall("asabusecontact")[0].text
-        ipdata[ip]["as"] = root.findall("as")[0].text
-        ipdata[ip]["asname"] = root.findall("asname")[0].text
-        ipdata[ip]["ascountry"] = root.findall("ascountry")[0].text
-        ipdata[ip]["assize"] = root.findall("assize")[0].text
-        ipdata[ip]["network"] = root.findall("network")[0].text
-        for idx2, webloginfo in enumerate(root.findall("weblogs")):
-            ipdata[ip]["weblog_count"] = webloginfo.findall("count")[0].text
-            ipdata[ip]["weblog_avgauthors"] = webloginfo.findall("avgauthors")[0].text
-            ipdata[ip]["weblog_avgurls"] = webloginfo.findall("avgurls")[0].text
-            ipdata[ip]["weblog_avguseragents"] = webloginfo.findall("avguser_agents")[0].text
-            ipdata[ip]["weblog_firstseen"] = webloginfo.findall("firstseen")[0].text
-            ipdata[ip]["lastseen"] = webloginfo.findall("lastseen")[0].text
-        return ipdata
 
 #<threatcategory>
 #<research>
@@ -333,30 +369,25 @@ def isc_research_threats(email, start_date=None, end_date=None):
         'User-Agent': f'Request from {email}',
     }   
 
-    while True:
-        try:
-            response = requests.get(url, headers=headers)
-        except Exception as e:
-            logging.error(f"Exception hit for SANS ISC Research Threats query: '{e}'. Pausing for 15 seconds before trying again.")
-            time.sleep(15)
-            continue
-        break
+    with _http.request_get(url, email=email, stream=True) as response:
+        body = _http._read_body(response, 64 * 1024 * 1024)
+    text_response = body.decode("utf-8-sig")
         
-    xml =  response.text
+    xml =  text_response
     logging.debug(f"XML Data: {xml}")
     root = ET.fromstring(xml)
     threat_intel = []
     for idx, research_info in enumerate(root.findall("research")):
         threat_intel.append(
             {
-                "ipv4": research_info.findall("ipv4")[0].text,
-                "added": research_info.findall("added")[0].text,
-                "lastseen": research_info.findall("lastseen")[0].text,
-                "type": research_info.findall("type")[0].text
+                "ipv4": research_info.findtext("ipv4"),
+                "added": (research_info.findtext("added") or research_info.findtext("date")),
+                "lastseen": research_info.findtext("lastseen"),
+                "type": research_info.findtext("type")
             }
         )
 
-    return pd.DataFrame(threat_intel)
+    return pd.DataFrame(threat_intel, columns=["ipv4", "added", "lastseen", "type"])
 
 def binary_edge_minions(email):
     # bad URL as of 7/6/2025
@@ -367,17 +398,11 @@ def binary_edge_minions(email):
         'User-Agent': f'Request from {email}',
     }   
 
-    while True:
-        try:
-            #this gave error 404 on 7/6/2025
-            response = requests.get(url, headers=headers)  
-        except Exception as e:
-            logging.error(f"Exception hit for Binary Edge query: '{e}'. Pausing for 15 seconds before trying again.")
-            time.sleep(15)
-            continue
-        break    
+    with _http.request_get(url, email=email, stream=True) as response:
+        body = _http._read_body(response, 64 * 1024 * 1024)
+    text_response = body.decode("utf-8-sig")
       
-    scanners =  json.loads(response.text)['scanners']
+    scanners =  json.loads(text_response)['scanners']
 
     #return a list of binary edge minions (scanning agents)
     return scanners
@@ -389,51 +414,40 @@ def censys_networks(email):
         'User-Agent': f'Request from {email}',
     }   
 
-    while True:
-        try:
-            response = requests.get(url, headers=headers) 
-        except Exception as e:
-            logging.error(f"Exception hit for Censys query: '{e}'. Pausing for 15 seconds before trying again.")
-            time.sleep(15)
-            continue
-        break
+    with _http.request_get(url, email=email, stream=True) as response:
+        body = _http._read_body(response, 64 * 1024 * 1024)
+    text_response = body.decode("utf-8-sig")
 
-    scanners =  response.text.split("\n")
+    scanners =  text_response.split("\n")
 
     #return a list of binary edge minions (scanning agents)
     return scanners
 
-@lru_cache
-def get_reverse_dns(ipaddress):
-    response = ""
-    try:
-        response = socket.gethostbyaddr(f"{ipaddress}")
-    except Exception as e:
-        if "host not found" in e:
-            logging.info(f"Lookup failed for {ipaddress}: {e}")
-        else:
-            logging.error(f"Lookup failed for {ipaddress}: {e}")
-    if len(response) == 0:
-        return response
-    else:
-        return response[0]
-    
+def get_reverse_dns(ipaddress, **kwargs):
+    """Return a PTR hostname or an empty string, preserving the legacy interface.
+
+    Use get_reverse_dns_info for all PTR names, failure status and timestamps.
+    Keyword arguments (including cache, resolver, timeout and lifetime) are
+    forwarded to that function. Programming/configuration errors are raised.
+    """
+    result = get_reverse_dns_info(ipaddress, **kwargs)
+    if result["status"] not in ("ok", "nxdomain", "no_ptr"):
+        logging.warning("Reverse DNS for %s: %s", ipaddress, result["status"])
+    return result["reverse_dns"]
+
 
 def isc_webhoneypot_useragents(user_agent, day, email):
-    url = f"https://isc.sans.edu/api/webhoneypotreportsbyua/{user_agent}/{day}?json"
+    encoded_agent = quote(str(user_agent), safe="")
+    encoded_day = quote(str(day), safe="")
+    url = f"https://isc.sans.edu/api/webhoneypotreportsbyua/{encoded_agent}/{encoded_day}?json"
     headers = {
         'User-Agent': f'Request from {email}',
     }   
-    while True:
-        try:
-            response = requests.get(url, headers=headers)  
-        except Exception as e:
-            logging.error(f"Exception hit for SANS ISC web honeypot user agent query: '{e}'. Pausing for 15 seconds before trying again.")
-            time.sleep(15)
-            continue
-        break
+    with _http.request_get(url, email=email, stream=True) as response:
+        body = _http._read_body(response, 64 * 1024 * 1024)
+    text_response = body.decode("utf-8-sig")
     
-    return json.loads(response.text)    
+    return json.loads(text_response)
     
 def extract_ips(data):
     ips = re.findall(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', data)
