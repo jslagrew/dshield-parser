@@ -1,4 +1,4 @@
-import os 
+import os
 
 # set working path. This is where data will logging data will be stored
 working_path = "."
@@ -29,14 +29,104 @@ import requests
 import dshield_parser.utils.sql
 import dshield_parser.utils.enrichment
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
+from pathlib import Path
+
+
+def _prepare_source_ips(sources):
+    """Canonicalize source addresses and return their deterministic union."""
+    addresses = set()
+    for name, source in sources.items():
+        if not isinstance(source, pd.DataFrame):
+            raise TypeError(f"{name} source data must be a pandas DataFrame")
+        if "ipv4" not in source.columns:
+            raise ValueError(f"{name} source data requires an ipv4 column")
+        normalized = []
+        for index, value in source["ipv4"].items():
+            try:
+                if not isinstance(value, (str, ipaddress.IPv4Address, ipaddress.IPv6Address)):
+                    raise ValueError("expected an IP address literal")
+                address = ipaddress.ip_address(value)
+                if getattr(address, "scope_id", None) is not None:
+                    raise ValueError("scoped IPv6 addresses are not supported")
+            except ValueError as exc:
+                raise ValueError(f"Invalid source IP in {name} at row {index}: {value!r}") from exc
+            normalized.append(str(address))
+        source["ipv4"] = pd.Series(normalized, index=source.index, dtype="object")
+        addresses.update(normalized)
+    return sorted(addresses)
+
+
+def _shodan_ipv4_addresses(payload):
+    """Return valid IPv4 records from an optional Shodan domain response."""
+    if payload is None:
+        return []
+    if not isinstance(payload, dict):
+        logging.warning("Ignoring an unexpected Shodan domain response")
+        return []
+    records = payload.get("data") or []
+    if not isinstance(records, (list, tuple)):
+        logging.warning("Ignoring unexpected Shodan domain records")
+        return []
+    addresses = []
+    for record in records:
+        value = record.get("value") if isinstance(record, dict) else None
+        if not isinstance(value, str):
+            continue
+        try:
+            addresses.append(str(ipaddress.IPv4Address(value)))
+        except ValueError:
+            # Domain responses also contain ordinary CNAME and AAAA records.
+            continue
+    return list(dict.fromkeys(addresses))
+
+
+def _optional_feed(source, fetch, default, *, skip_reason=None):
+    """Keep failed optional sources unknown and record their availability."""
+    row = {"source": source, "status": "ok", "checked_at": time.time(),
+           "retry_at": None, "error": None}
+    result = default
+    if skip_reason is not None:
+        row.update(status="skipped", error=skip_reason)
+        logging.warning("Optional enrichment source %s skipped: %s", source, skip_reason)
+    else:
+        try:
+            response = fetch()
+            if response is None:
+                row["status"] = "unavailable"
+                logging.warning("Optional enrichment source %s returned no result", source)
+            elif not isinstance(response, type(default)):
+                raise TypeError("unexpected response type")
+            else:
+                result = response
+        except dshield_parser.utils.enrichment.EnrichmentRateLimitError as exc:
+            row.update(status="deferred", retry_at=exc.retry_at)
+            logging.warning("Optional enrichment source %s deferred until %s", source, exc.retry_at)
+        except Exception as exc:
+            # Optional feeds must not discard the run's event data. Store the
+            # error type, never provider exception text that could contain keys.
+            row.update(status="error", error=type(exc).__name__)
+            logging.warning("Optional enrichment source %s failed (%s)", source, type(exc).__name__)
+    enrichment_sources.append(row)
+    return result
+
+
+def _get_feed_text(url):
+    with requests.get(url, timeout=(3.05, 10)) as response:
+        response.raise_for_status()
+        return response.text
+
+
+# Availability is separate from labels: a failed source is not evidence of a
+# benign IP. checked_at records this check, not a cached result's fetch time.
+enrichment_sources = []
 
 
 # enter email address to be used in user agent strings for data enrichment
-email = "enter email address here"
+email = os.environ.get("DSHIELD_CONTACT_EMAIL", "")
 
 # enter shodan API key for Shodan data enrichment
-shodan_api = "enter Shodan API key here"
+shodan_api = os.environ.get("SHODAN_API_KEY", "")
 
 # enter filename for SQLite data
 filename = "2024-09-07-120032_extracts_dates.sqlite"
@@ -57,40 +147,42 @@ firewall_data = firewall_data.rename(columns={"sip": "ipv4"})
 firewall_data = firewall_data.rename(columns={"dates": "date"})
 
 # get unique list of ip addresses in all of the logs
-ips = list(set(web_data["ipv4"].tolist() + cowrie_data["ipv4"].tolist() + firewall_data["ipv4"].tolist()))
-           
+ips = _prepare_source_ips({
+    "web": web_data, "cowrie": cowrie_data, "firewall": firewall_data,
+})
+
 # set up and start multi-threaded process to gather reverse DNS of all IP addresses
-runner = ThreadPoolExecutor()
-ips = list(set(firewall_data["ipv4"].tolist()))
-ips_reverse_dns = [runner.submit(dshield_parser.utils.enrichment.get_reverse_dns, ipv4) for ipv4 in ips]
+# Cache is shared across runs; each completed lookup is persisted by the helper.
+cache_path = Path(os.environ.get(
+    "DSHIELD_ENRICHMENT_CACHE",
+    str(Path.home() / "dshield-parser-cache" / "enrichment.sqlite"),
+)).expanduser()
+with dshield_parser.utils.enrichment.EnrichmentCache(cache_path) as cache:
+    dns_results = list(dshield_parser.utils.enrichment.iter_reverse_dns(
+        ips, cache=cache, max_workers=16, timeout=1.0, lifetime=3.0,
+    ))
+lookups = pd.DataFrame([
+    {"ipv4": item["ip"], "reverse_dns": item["reverse_dns"],
+     "reverse_dns_status": item["status"],
+     "reverse_dns_fetched_at": item["fetched_at"],
+     "reverse_dns_expires_at": item["expires_at"]}
+    for item in dns_results
+], columns=["ipv4", "reverse_dns", "reverse_dns_status",
+            "reverse_dns_fetched_at", "reverse_dns_expires_at"])
 
-# check on process of reverse DNS lookups
-done = False
-while not done:
-    number_not_complete = 0
-    for each_lookup in ips_reverse_dns:
-        if each_lookup.done() == False:
-            number_not_complete += 1
-            logging.debug(f"State: {each_lookup._state} left")
-    if number_not_complete == 0:
-        done = True
-        logging.info(f"Processing completed. {number_not_complete} left")
-    else:
-        logging.info(f"Processing not yet completed. {number_not_complete} left")
-    time.sleep(10)
-
-# create dataframe of ip addresses and their reverse DNS lookups
-reverse_dns = [rdns._result for rdns in ips_reverse_dns]
-lookups = pd.DataFrame({'ipv4': ips, 'reverse_dns': reverse_dns})
 
 # join the reverse DNS lookup data with cowrie, web and firewall honeypot dataframes
-web_data = web_data.merge(lookups, on=["ipv4"], how="left")
-cowrie_data = cowrie_data.merge(lookups, on=["ipv4"], how="left")
-firewall_data = firewall_data.merge(lookups, on=["ipv4"], how="left")
+web_data = web_data.merge(lookups, on=["ipv4"], how="left", validate="many_to_one")
+cowrie_data = cowrie_data.merge(lookups, on=["ipv4"], how="left", validate="many_to_one")
+firewall_data = firewall_data.merge(lookups, on=["ipv4"], how="left", validate="many_to_one")
 
 # retrieve mass scanner data for enrichment
 # https://github.com/stamparm/maltrail/blob/master/trails/static/mass_scanner.txt
-mass_scanners = requests.get("https://raw.githubusercontent.com/stamparm/maltrail/master/trails/static/mass_scanner.txt").text.split("\n")
+mass_scanners = _optional_feed(
+    "maltrail", lambda: _get_feed_text(
+        "https://raw.githubusercontent.com/stamparm/maltrail/master/trails/static/mass_scanner.txt"
+    ).splitlines(), [],
+)
 ip = []
 comment = []
 for each_item in mass_scanners:
@@ -107,14 +199,17 @@ for each_item in mass_scanners:
 scanners = pd.DataFrame({"ipv4": ip, "mass_scanner": comment})
 
 #add scanner data from https://github.com/stamparm/maltrail/blob/master/trails/static/mass_scanner.txt
-web_data = web_data.merge(scanners, on=["ipv4"], how="left").sort_values("mass_scanner")
-cowrie_data = cowrie_data.merge(scanners, on=["ipv4"], how="left").sort_values("mass_scanner")
-firewall_data = firewall_data.merge(scanners, on=["ipv4"], how="left").sort_values("mass_scanner")
+scanner_lookup = scanners.groupby("ipv4", as_index=False).agg(
+    mass_scanner=("mass_scanner", lambda values: " | ".join(sorted(set(values.dropna())))),
+)
+web_data = web_data.merge(scanner_lookup, on=["ipv4"], how="left", validate="many_to_one").sort_values("mass_scanner")
+cowrie_data = cowrie_data.merge(scanner_lookup, on=["ipv4"], how="left", validate="many_to_one").sort_values("mass_scanner")
+firewall_data = firewall_data.merge(scanner_lookup, on=["ipv4"], how="left", validate="many_to_one").sort_values("mass_scanner")
 
 # add any IPs with a user agent containing "CensysInspect" as a Censys research IP
 censys_ips = web_data[web_data['user-agent'].str.contains("CensysInspect", na=False)]['ipv4'].tolist()
 research_data = pd.DataFrame()
-censys_networks = dshield_parser.utils.enrichment.censys_networks(email)
+censys_networks = _optional_feed("censys", lambda: dshield_parser.utils.enrichment.censys_networks(email), [])
 for each_network in censys_networks:
     try:
         censys_ips += [str(ip) for ip in ipaddress.IPv4Network(each_network)]
@@ -128,7 +223,7 @@ research_ips["Research Organization"] = "Censys"
 research_data = pd.concat([research_data, research_ips])
 
 # gather binary edge minion IP addresses
-binaryedge_networks = dshield_parser.utils.enrichment.binary_edge_minions(email)
+binaryedge_networks = _optional_feed("binaryedge", lambda: dshield_parser.utils.enrichment.binary_edge_minions(email), [])
 return_addresses = []
 for each_address in binaryedge_networks:
     if ":" not in each_address:
@@ -163,16 +258,21 @@ for each_network in paloalto_networks:
 palo_ips = list(set(palo_ips))
 research_ips = pd.DataFrame(palo_ips, columns=["ipv4"])
 research_ips["Research Organization"] = "Palo Alto Expanse"
-research_data = pd.concat([research_data, research_ips])    
+research_data = pd.concat([research_data, research_ips])
 
 #https://internet-measurement.com/#ips
-#internetmeasurement_networks = ["87.236.176.0/24", "193.163.125.0/24", "68.183.53.77/32", "104.248.203.191/32", "104.248.204.195/32", 
+#internetmeasurement_networks = ["87.236.176.0/24", "193.163.125.0/24", "68.183.53.77/32", "104.248.203.191/32", "104.248.204.195/32",
 #                                "142.93.191.98/32", "157.245.216.203/32", "165.22.39.64/32", "167.99.209.184/32", "188.166.26.88/32",
 #                                "206.189.7.178/32", "209.97.152.248/32"]
 
 # add internetmeasurement IPs to research_data dataframe - implied from user agent data in web requests
 internetmeasurement_ips = web_data[web_data['user-agent'].str.contains("InternetMeasurement", na=False)]['ipv4'].tolist()
-internetmeasurement_networks = dshield_parser.utils.enrichment.extract_subnets(requests.get("https://internet-measurement.com/#ips").text)
+internetmeasurement_networks = _optional_feed(
+    "internet_measurement",
+    lambda: dshield_parser.utils.enrichment.extract_subnets(
+        _get_feed_text("https://internet-measurement.com/#ips")
+    ), [],
+)
 for each_network in internetmeasurement_networks:
     try:
         internetmeasurement_ips += [str(ip) for ip in ipaddress.IPv4Network(each_network)]
@@ -181,7 +281,7 @@ for each_network in internetmeasurement_networks:
 
 research_ips = pd.DataFrame(internetmeasurement_ips, columns=["ipv4"])
 research_ips["Research Organization"] = "Internet Measurement"
-research_data = pd.concat([research_data, research_ips])    
+research_data = pd.concat([research_data, research_ips])
 
 # add ipip IPs to research_data dataframe - implied from user agent data in web requests
 ipip_ips = web_data[web_data['user-agent'].str.contains("ipip", na=False)]['ipv4'].tolist()
@@ -195,48 +295,39 @@ for each_network in ipip_networks:
 ipip_ips = list(set(ipip_ips))
 research_ips = pd.DataFrame(ipip_ips, columns=["ipv4"])
 research_ips["Research Organization"] = "IPIP Security"
-research_data = pd.concat([research_data, research_ips])    
+research_data = pd.concat([research_data, research_ips])
 
 # add LeakIX IPs to research_data dataframe - implied from user agent data in web requests
-leakix_ips = web_data[web_data['user-agent'].str.contains("leakix", na=False)]['ipv4'].tolist()
-leakix_domains = dshield_parser.utils.enrichment.get_shodan_domain("leakix.org", shodan_api)
-for each_item in leakix_domains["data"]:
-    ip = each_item["value"]
-    try:
-        ipaddress.IPv4Address(ip)
-        leakix_ips.append(ip)
-    except Exception as e:
-        logging.error(f"Issus with {ip}: {e}")
+leakix_ips = web_data[web_data['user-agent'].str.contains("leakix", case=False, na=False)]['ipv4'].tolist()
+leakix_domains = _optional_feed(
+    "shodan:leakix.org", lambda: dshield_parser.utils.enrichment.get_shodan_domain("leakix.org", shodan_api), {},
+    skip_reason=None if shodan_api else "missing_api_key",
+)
+leakix_ips.extend(_shodan_ipv4_addresses(leakix_domains))
 
 research_ips = pd.DataFrame(leakix_ips, columns=["ipv4"])
 research_ips["Research Organization"] = "LeakIX"
-research_data = pd.concat([research_data, research_ips]) 
+research_data = pd.concat([research_data, research_ips])
 
 # add Onyphe IPs to research_data dataframe - implied from shodan domain data
 onyphe_ips = []
-onyphe_domains = dshield_parser.utils.enrichment.get_shodan_domain("onyphe.net", shodan_api)
-for each_item in onyphe_domains["data"]:
-    ip = each_item["value"]
-    try:
-        ipaddress.IPv4Address(ip)
-        onyphe_ips.append(ip)
-    except Exception as e:
-        logging.error(f"Issus with {ip}: {e}")
+onyphe_domains = _optional_feed(
+    "shodan:onyphe.net", lambda: dshield_parser.utils.enrichment.get_shodan_domain("onyphe.net", shodan_api), {},
+    skip_reason=None if shodan_api else "missing_api_key",
+)
+onyphe_ips.extend(_shodan_ipv4_addresses(onyphe_domains))
 
 research_ips = pd.DataFrame(onyphe_ips, columns=["ipv4"])
-research_ips["Research Organization"] = "LeakIX"
-research_data = pd.concat([research_data, research_ips]) 
+research_ips["Research Organization"] = "Onyphe"
+research_data = pd.concat([research_data, research_ips])
 
 # add recyber IPs to research_data dataframe - implied from shodan domain data
 recyber_ips =[]
-recyber_networks = dshield_parser.utils.enrichment.get_shodan_domain("recyber.net", shodan_api)
-for each_item in recyber_networks["data"]:
-    ip = each_item["value"]
-    try:
-        ipaddress.IPv4Address(ip)
-        recyber_ips.append(ip)
-    except Exception as e:
-        logging.error(f"Issus with {ip}: {e}")
+recyber_networks = _optional_feed(
+    "shodan:recyber.net", lambda: dshield_parser.utils.enrichment.get_shodan_domain("recyber.net", shodan_api), {},
+    skip_reason=None if shodan_api else "missing_api_key",
+)
+recyber_ips.extend(_shodan_ipv4_addresses(recyber_networks))
 
 # add recyber IPs to research_data dataframe
 recyber_networks = ["89.248.163.0/25", "89.248.165.0/24"]
@@ -249,97 +340,130 @@ for each_network in recyber_networks:
 recyber_ips = list(set(recyber_ips))
 research_ips = pd.DataFrame(recyber_ips, columns=["ipv4"])
 research_ips["Research Organization"] = "Recyber"
-research_data = pd.concat([research_data, research_ips])    
+research_data = pd.concat([research_data, research_ips])
 
 
-# add LeakIX IPs to research_data dataframe - implied from data in web requests and Shodan domain data
+# add Shadowserver IPs inferred from web requests and Shodan domain data
 shadowserver_ips = web_data[web_data['url'].str.contains("shadowserver", na=False)]['ipv4'].tolist()
-shadowserver_domains = dshield_parser.utils.enrichment.get_shodan_domain("shadowserver.org", shodan_api)
-for each_item in shadowserver_domains["data"]:
-    ip = each_item["value"]
-    try:
-        ipaddress.IPv4Address(ip)
-        shadowserver_ips.append(ip)
-    except Exception as e:
-        logging.error(f"Issus with {ip}: {e}")
+shadowserver_domains = _optional_feed(
+    "shodan:shadowserver.org", lambda: dshield_parser.utils.enrichment.get_shodan_domain("shadowserver.org", shodan_api), {},
+    skip_reason=None if shodan_api else "missing_api_key",
+)
+shadowserver_ips.extend(_shodan_ipv4_addresses(shadowserver_domains))
 
 research_ips = pd.DataFrame(shadowserver_ips, columns=["ipv4"])
 research_ips["Research Organization"] = "Shadowserver"
-research_data = pd.concat([research_data, research_ips]) 
+research_data = pd.concat([research_data, research_ips])
 
 # marge research IP data with honeypot dataframes (web, cowrie, firewall)
-web_data = web_data.merge(research_data, on=["ipv4"], how="left").sort_values("Research Organization")
-cowrie_data = cowrie_data.merge(research_data, on=["ipv4"], how="left").sort_values("Research Organization")
-firewall_data = firewall_data.merge(research_data, on=["ipv4"], how="left").sort_values("Research Organization")
+research_lookup = research_data.groupby("ipv4", as_index=False).agg({
+    "Research Organization": lambda values: " | ".join(sorted(set(values.dropna())))
+})
+web_data = web_data.merge(research_lookup, on=["ipv4"], how="left", validate="many_to_one").sort_values("Research Organization")
+cowrie_data = cowrie_data.merge(research_lookup, on=["ipv4"], how="left", validate="many_to_one").sort_values("Research Organization")
+firewall_data = firewall_data.merge(research_lookup, on=["ipv4"], how="left", validate="many_to_one").sort_values("Research Organization")
 
 # gather researcher IPs from SANS Internet storm center based on date range
-isc_researchers = dshield_parser.utils.enrichment.isc_research_threats(email, start_date="2024-04-21", end_date="2024-05-21")
-isc_researchers = isc_researchers.rename(columns={"type": "isc_researcher"})     
-isc_researchers = isc_researchers.rename(columns={"added": "isc_added"})        
-isc_researchers = isc_researchers.rename(columns={"lastseen": "isc_lastseen"})           
+isc_researchers = _optional_feed(
+    "isc_researchers", lambda: dshield_parser.utils.enrichment.isc_research_threats(email, start_date="2024-04-21", end_date="2024-05-21"),
+    pd.DataFrame(columns=["ipv4", "added", "lastseen", "type"]),
+)
+isc_researchers = isc_researchers.rename(columns={"type": "isc_researcher"})
+isc_researchers = isc_researchers.rename(columns={"added": "isc_added"})
+isc_researchers = isc_researchers.rename(columns={"lastseen": "isc_lastseen"})
+# An empty feed may have no columns; absent optional dates stay unknown.
+isc_researchers = isc_researchers.reindex(
+    columns=["ipv4", "isc_added", "isc_lastseen", "isc_researcher"]
+).astype({"ipv4": "object", "isc_researcher": "object"})
 
 # marge SANS ISC research IP data with honeypot dataframes (web, cowrie, firewall)
-web_data = web_data.merge(isc_researchers, on=["ipv4"], how="left")
-cowrie_data = cowrie_data.merge(isc_researchers, on=["ipv4"], how="left")
-firewall_data = firewall_data.merge(isc_researchers, on=["ipv4"], how="left")
+isc_lookup = isc_researchers.groupby("ipv4", as_index=False).agg(
+    isc_added=("isc_added", "min"), isc_lastseen=("isc_lastseen", "max"),
+    isc_researcher=("isc_researcher", lambda values: " | ".join(sorted(set(values.dropna())))),
+)
+web_data = web_data.merge(isc_lookup, on=["ipv4"], how="left", validate="many_to_one")
+cowrie_data = cowrie_data.merge(isc_lookup, on=["ipv4"], how="left", validate="many_to_one")
+firewall_data = firewall_data.merge(isc_lookup, on=["ipv4"], how="left", validate="many_to_one")
 
 # perform ISC network data lookups, preferring a local cache file and doing a lookup when data not found in the local file
-ip_data = []
-ip_data_file = "ip_lookups.txt"
-if os.path.isfile(ip_data_file):
-    filehandle = open(ip_data_file, "r")
-    for each_line in open(ip_data_file):
-        tempdata = json.loads(each_line)
-        ip_data.append(tempdata)
-ip_df = pd.DataFrame()
-ips = set(web_data['ipv4'].values.tolist() + cowrie_data['ipv4'].values.tolist() + firewall_data['ipv4'].values.tolist())
-for each_ip in ips:
-    match = False
-    for each_data in ip_data:
-        if "network" in each_data:
-            if each_data["network"] != None:
-                if ipaddress.ip_address(each_ip) in ipaddress.ip_network(each_data['network']):
-                    logging.debug(f"Found {each_ip} in the local list. No need to look it up via API")
-                    temp_data = each_data.copy() #issue with data overwrite without using .copy()
-                    temp_data["ipv4"] = each_ip
-                    ip_data.append(temp_data)
-                    match = True
-                    break
-            elif each_data["ipv4"] == each_ip:
-                logging.debug(f"Found {each_ip} in the local list. No need to look it up via API")
-                match = True
-                break
+# Choose a local database by setting one of these paths. ISC remains an explicit
+# fallback when neither path is configured. Never reinterpret country/AS-size.
+asn_mmdb = os.environ.get("DSHIELD_ASN_MMDB")
+iptoasn_file = os.environ.get("DSHIELD_IPTOASN_FILE")
+if asn_mmdb and iptoasn_file:
+    raise ValueError("Set only one of DSHIELD_ASN_MMDB and DSHIELD_IPTOASN_FILE")
 
-    if not match:
-        try:
-            tempdata = dshield_parser.utils.enrichment.isc_ipinfo(each_ip, email)
-        except Exception as e:
-            logging.error(f"ISC ipinfo lookup failed for {each_ip} {e}")
-        tempdata = {"ipv4": tempdata[each_ip]["number"], 
-                        "as": tempdata[each_ip]["as"],
-                        "asname": tempdata[each_ip]["asname"],
-                        "ascountry": tempdata[each_ip]["ascountry"],
-                        "assize": tempdata[each_ip]["assize"],
-                        "network": tempdata[each_ip]["network"],
-                        "updated": tempdata[each_ip]["updated"]
-                        }
-        ip_data.append(tempdata)
-        filehandle = open("ip_lookups.txt", "a", encoding="utf-8")
-        filehandle.write(json.dumps(tempdata) + "\n")
-        filehandle.close()
-        time.sleep(5)
+ips = sorted(set(web_data["ipv4"]) | set(cowrie_data["ipv4"]) | set(firewall_data["ipv4"]))
+ip_rows = []
+fields = ["ipv4", "as", "asname", "ascountry", "assize", "network", "updated",
+          "enrichment_source", "enrichment_status", "enrichment_fetched_at",
+          "enrichment_retry_at", "asn_range_start", "asn_range_end", "source_country"]
+with ExitStack() as stack:
+    cache = stack.enter_context(dshield_parser.utils.enrichment.EnrichmentCache(cache_path))
+    session = stack.enter_context(requests.Session())
+    reader = None
+    database = None
+    if asn_mmdb:
+        import geoip2.database
+        reader = stack.enter_context(geoip2.database.Reader(asn_mmdb))
+    elif iptoasn_file:
+        database = dshield_parser.utils.enrichment.load_iptoasn_database(iptoasn_file)
+    for each_ip in ips:
+        row = dict.fromkeys(fields)
+        row["ipv4"] = each_ip
+        if not ipaddress.ip_address(each_ip).is_global:
+            row["enrichment_status"] = "non_global"
+            ip_rows.append(row)
+            continue
+        if reader is not None or database is not None:
+            if reader is not None:
+                record = dshield_parser.utils.enrichment.get_geoip_asn(each_ip, reader=reader)
+            else:
+                record = dshield_parser.utils.enrichment.get_iptoasn_data(each_ip, database)
+            row.update({"as": record.get("asn"), "asname": record.get("asn_organization"),
+                        "network": record.get("lookup_network"),
+                        "enrichment_source": record["source"], "enrichment_status": record["status"],
+                        "enrichment_fetched_at": record["fetched_at"],
+                        "asn_range_start": record.get("range_start"),
+                        "asn_range_end": record.get("range_end"),
+                        "source_country": record.get("source_country")})
+        else:
+            row["enrichment_source"] = "isc"
+            try:
+                record = dshield_parser.utils.enrichment.isc_ipinfo(
+                    each_ip, email, cache=cache, session=session,
+                )[each_ip]
+            except dshield_parser.utils.enrichment.EnrichmentRateLimitError as exc:
+                row["enrichment_status"] = "deferred"
+                row["enrichment_retry_at"] = exc.retry_at
+            except dshield_parser.utils.enrichment.EnrichmentError as exc:
+                logging.warning("ISC lookup failed for %s: %s", each_ip, exc)
+                row["enrichment_status"] = "error"
+            else:
+                row.update({key: record.get(key) for key in
+                            ("as", "asname", "ascountry", "assize", "network", "updated")})
+                row["enrichment_status"] = "ok"
+                # The provider's updated field is not a local lookup timestamp.
+                row["enrichment_fetched_at"] = record.get("fetched_at")
+        ip_rows.append(row)
 
-# merge SANS ISC WHOIS data with honeypot dataframes (web, cowrie, firewall)
-ip_data = pd.DataFrame(ip_data)
-web_data = web_data.merge(ip_data, on=["ipv4"], how="left")
-cowrie_data = cowrie_data.merge(ip_data, on=["ipv4"], how="left")
-firewall_data = firewall_data.merge(ip_data, on=["ipv4"], how="left")
+# One result row per IP; duplicate enrichment must not multiply event counts.
+ip_data = pd.DataFrame(ip_rows, columns=fields)
+web_data = web_data.merge(ip_data, on="ipv4", how="left", validate="many_to_one")
+cowrie_data = cowrie_data.merge(ip_data, on="ipv4", how="left", validate="many_to_one")
+firewall_data = firewall_data.merge(ip_data, on="ipv4", how="left", validate="many_to_one")
+logging.info("IP enrichment status counts: %s", ip_data["enrichment_status"].value_counts().to_dict())
+
 
 # write data to new SQLite file
 # research data also stored as separate tables
+enrichment_sources = pd.DataFrame(
+    enrichment_sources, columns=["source", "status", "checked_at", "retry_at", "error"]
+)
 dshield_parser.utils.sql.insert_df(f"{date}_honeypot_enrichment_mappings.sqlite", web_data, "web")
 dshield_parser.utils.sql.insert_df(f"{date}_honeypot_enrichment_mappings.sqlite", cowrie_data, "cowrie")
 dshield_parser.utils.sql.insert_df(f"{date}_honeypot_enrichment_mappings.sqlite", firewall_data, "firewall")
 dshield_parser.utils.sql.insert_df(f"{date}_honeypot_enrichment_mappings.sqlite", scanners, "mass_scanners")
 dshield_parser.utils.sql.insert_df(f"{date}_honeypot_enrichment_mappings.sqlite", research_data, "public_researcher_data")
 dshield_parser.utils.sql.insert_df(f"{date}_honeypot_enrichment_mappings.sqlite", isc_researchers, "isc_researchers")
+dshield_parser.utils.sql.insert_df(f"{date}_honeypot_enrichment_mappings.sqlite", enrichment_sources, "enrichment_sources")
