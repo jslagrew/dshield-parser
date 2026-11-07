@@ -5,3 +5,5 @@ requests==2.33.1
 scikit-learn==1.8.0
 shodan==1.28.0
 SQLAlchemy==2.0.49
+dnspython==2.9.2
+

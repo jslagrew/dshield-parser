@@ -1,8 +1,13 @@
+from pathlib import Path
+from runpy import run_path
+
 import setuptools
+
+VERSION = run_path(str(Path(__file__).parent / "dshield_parser" / "_version.py"))["__version__"]
 
 setuptools.setup(
     name="dshield_parser",
-    version="0.1.7",
+    version=VERSION,
     author="Jesse La Grew",
     author_email="jlagrew.github@proton.me",
     description="This program has utilities to download, parse and enrich DShield honeypot data",
@@ -15,6 +20,7 @@ setuptools.setup(
     #},
     python_requires='>=3.12',
     install_requires=[
+        "dnspython>=2.6.1",
         "matplotlib>=3.6.3",
         "numpy>=1.26.0",
         "pandas>=2.0.3",
@@ -23,4 +29,8 @@ setuptools.setup(
         "shodan>=1.28.0",
         "SQLAlchemy>=2.0.31",
     ],
+    extras_require={
+        "geoip": ["geoip2>=4.8.0"],
+    },
 )
+
