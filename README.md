@@ -14,8 +14,9 @@ See the [complete enrichment guide](docs/IP-ENRICHMENT.md) for installation,
 database downloads, function examples, result fields, cache behavior, and
 migration from 0.1.x. The [changelog](CHANGELOG.md) lists release changes.
 
-From a checkout, install the optional MaxMind reader with
-`python -m pip install -e ".[geoip]"`. Database files remain caller-managed.
+Install the released package and optional MaxMind reader directly from PyPI with
+`python -m pip install --upgrade "dshield-parser[geoip]==0.2.0"`.
+Database files remain caller-managed.
 
 ## Installing
 
@@ -25,10 +26,15 @@ Python 3.12 or later is required by this repository's `setup.py`. A virtual envi
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install dshield-parser
+python -m pip install --upgrade dshield-parser
 ```
 
-On Windows, activate with `.venv\Scripts\activate` instead. To work from a checkout instead of the published package, run `python -m pip install -e .` in the repository root. The package declares dependencies for data frames, plotting, SQLite access, and optional enrichment services; the pinned development versions are in `requirements.txt`.
+On Windows, activate with `.venv\Scripts\activate`. For GeoLite2 support, use the
+`dshield-parser[geoip]` extra shown above. For development from a source checkout,
+run `python -m pip install -e .` in the repository root, or
+`python -m pip install -e ".[geoip]"` to include the MaxMind reader. The package
+declares dependencies for data frames, plotting, SQLite access, and optional
+enrichment services; the pinned development versions are in `requirements.txt`.
 
 ## What it does
 

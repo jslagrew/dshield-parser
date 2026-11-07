@@ -8,22 +8,23 @@ the local, DNS, HTTP, and SQLite responsibilities.
 
 ## Installation
 
-From this checkout:
+Install the released package from PyPI using Python 3.12 or later:
 
 ```sh
-python -m pip install -e ".[geoip]"
+python -m pip install --upgrade "dshield-parser[geoip]==0.2.0"
 python -c "import dshield_parser; print(dshield_parser.__version__)"
 ```
 
 The version is `0.2.0`. The `geoip` extra installs the optional MaxMind Python
-reader. Use `python -m pip install -e .` if only using IPtoASN, DNS, RDAP, or ISC.
-Dnspython is a core dependency because the legacy DNS function now uses it.
-After 0.2.0 is published, the equivalent package installation is
-`python -m pip install "dshield-parser[geoip]==0.2.0"`.
+reader. Use `python -m pip install --upgrade dshield-parser` if only using
+IPtoASN, DNS, RDAP, or ISC. Dnspython is a core dependency because the legacy DNS
+function now uses it. Neither PyPI installation requires a source checkout.
 
-Creating the changes in GitHub does not publish the package to PyPI. The existing
-release workflow still requires a matching version tag; its test and version
-checks now run before publication. The single version source is
+For development from a source checkout, use `python -m pip install -e ".[geoip]"`
+with the MaxMind reader, or `python -m pip install -e .` for the base package.
+
+PyPI releases are published by the version-tag workflow. Its tag/version check
+and enrichment tests run before publication. The single version source is
 `dshield_parser/_version.py`, read by both the package and `setup.py`.
 
 ## Public API
